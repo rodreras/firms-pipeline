@@ -121,7 +121,7 @@ occurrences/
   year=2026/
     2026.json
     occurrences.parquet
-    aggregate-l0.parquet
+    aggregate-l5.parquet
     aggregate-l4.parquet
 ```
 
@@ -160,3 +160,69 @@ are available for retry.
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## GitHub Actions
+
+The ingestion workflows use the `firms-production` GitHub environment. Set
+these GitHub environment secrets before dispatching either workflow.
+
+| Secret | Value |
+| --- | --- |
+| `FIRMS_MAP_KEY` | NASA FIRMS MAP key |
+| `GCLOUD_URI` | Public GCS dataset root |
+| `GCLOUD_PRIVATE_URI` | Private GCS cache, manifests, and backups root |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full Google Cloud workload identity provider resource name |
+| `GCP_SERVICE_ACCOUNT` | Email of the publishing service account |
+
+Configure Google Cloud Workload Identity Federation to allow the trusted
+repository and ref to impersonate that account. Restrict deployment refs in
+the GitHub environment and give the account only the permissions needed on
+the two GCS prefixes described above.
+
+- **FIRMS historical backfill** runs on manual dispatch. The defaults are
+  January 1, 2000 through the UTC date the workflow was created, inclusive.
+  For example, a run created on November 19, 2026 ends on November 19, 2026.
+  Supply either or both dates to narrow a dispatch. The job publishes one
+  calendar year at a time and FIRMS availability determines which
+  product-days can be downloaded. Current-day results reflect what FIRMS
+  has at request time. Later runs skip covered product-days, so use a
+  completed date as the end if you need to avoid marking a partial day
+  covered.
+- **FIRMS daily ingestion** requests the seven completed UTC days before
+  the workflow creation date. It is scheduled at **04:00 UTC** on the default
+  branch. GitHub cron is best effort and can run late or drop a scheduled
+  run. There is no guaranteed publication time. The rolling window can fill
+  recent missed dates. For an older gap, manually dispatch with the inclusive
+  start and end dates.
+- Both workflows use the same publisher concurrency group. A running job
+  keeps its slot. GitHub may replace a pending job with a newer one, and
+  publishers started outside GitHub Actions must be coordinated separately.
+  Both jobs use the existing five-day FIRMS request windows and shared-key
+  budget checks with a 5,000-transaction ceiling. The client waits for budget
+  to recover, honors supported HTTP 429 retry delays, and bounds HTTP
+  retries. Reserve the key for one publisher at a time.
+
+Re-run a failed Actions job to use the original workflow date and inputs.
+Completed product-days are skipped, and checksummed private chunks let the
+same interval resume where it stopped. The runner has a 350-minute limit.
+Use smaller date ranges when a long backfill needs multiple dispatches.
+The publisher stages and checks the annual data, H3 aggregates, and STAC
+links before uploading. The public catalog points to current annual Items.
+Source versions are preserved in observations, and the private ingestion
+manifest records the processor commit.
+
+A hard stop during replacement of an existing annual partition can leave
+the public files and Item on different generations. If a retry reports a
+published checksum mismatch, pause ingestion for the dataset and locate the
+affected run's private `annual-backup/` prefix. Verify the expected bytes
+against the Item and have the dataset operator restore the affected objects
+with generation preconditions before rerunning. A corrupted private chunk
+also requires operator recovery before a retry can use it. The seven-day
+window fills uncovered product-days. It leaves covered data and observations
+from distinct FIRMS products in place, including overlapping NRT and SP.
+
+The **Pull request checks** workflow runs Ruff lint, Ruff formatting for
+changed Python files, the local tests, and a redacted Gitleaks scan of PR
+commits. It uses no production credentials. Enable its two jobs as required
+checks in branch protection to enforce them. To scan staged changes locally,
+install pre-commit and run `pre-commit install` from the repository root.

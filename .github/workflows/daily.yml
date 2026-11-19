@@ -1,0 +1,26 @@
+name: FIRMS daily ingestion
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First day (YYYY-MM-DD). Defaults to seven days before dispatch.
+        type: string
+      end_date:
+        description: Last day (YYYY-MM-DD). Defaults to yesterday UTC.
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  daily:
+    uses: ./.github/workflows/publish.yml
+    with:
+      mode: daily
+      start_date: ${{ inputs.start_date || '' }}
+      end_date: ${{ inputs.end_date || '' }}

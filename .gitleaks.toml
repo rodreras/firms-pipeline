@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "firms-map-key"
+description = "NASA FIRMS MAP key assigned in configuration or source"
+regex = '''(?i)\b(?:FIRMS_MAP_KEY|FIRMS_API_KEY|MAP_KEY)["']?\s*(?:=|:)\s*["']?([a-f0-9]{32})\b'''
+secretGroup = 1
+keywords = ["firms_map_key", "firms_api_key", "map_key"]

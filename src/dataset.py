@@ -18,7 +18,7 @@ from src.annual import chunk_coverage, compact_coverage, item_coverage, merge_ob
 from src.catalog import PARQUET_MEDIA_TYPE, save_bytes, save_stac, yearly_asset
 from src.logs import event
 
-RESOLUTIONS = (0,4)
+RESOLUTIONS = (4,5)
 SUMMARY_COLUMNS = {
     "year": ("int32", "UTC observation year."),
     "h3_cell": ("uint64", "Numeric H3 cell index."),
@@ -34,7 +34,7 @@ DATASET_README = b"""# NASA FIRMS South America
 
 Open catalog.json to discover the occurrences collection and its annual items.
 Each year directory holds occurrences.parquet (WGS 84 point GeoParquet) and
-aggregate-l6.parquet and aggregate-l9.parquet (polygon GeoParquet grouped
+aggregate-l4.parquet and aggregate-l5.parquet (polygon GeoParquet grouped
 by H3 cell and UTC observation year). The Item records the processed date range and source
 products. A year directory can cover a partial year.
 
