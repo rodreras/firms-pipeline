@@ -51,8 +51,111 @@ before area requests and retries, with a provisional ceiling of 5,000
 transactions per window. Independent jobs using the same key share NASA's
 budget.
 
-The January validation uses local storage. A GCS destination in `.env` is
-reserved for the later cloud publishing step.
+## Reuse a completed CSV download
+
+Pass a completed raw run manifest under the raw output directory's `runs/`
+folder. The importer verifies each CSV against its recorded SHA-256 and byte
+size, preserves its original download timestamp, and writes the annual
+GeoParquet, STAC catalog, and a new local run manifest without contacting FIRMS.
+
+```bash
+python -m src.ingest \
+  --csv-manifest outputs/firms-raw/runs/d14ce1f2fcd94a3ea5e54c2c65677611.json \
+  --start-date 2026-01-01 --end-date 2026-01-31 \
+  --bbox=-82.44,-56.46,-34.10,13.58 \
+  --output outputs/firms-january-test
+```
+
+The dates are inclusive and the bbox is west, south, east, north in WGS 84
+degrees. The arguments also apply to the online downloader and must match
+the raw manifest for an offline import. With no overrides, the downloader
+uses the January 2026 dates and the existing South America request box.
+STAC Item bounds come from the observations, and an empty collection uses
+the request bbox.
+
+## Run the GCS pipeline
+
+Set both destinations in `.env` at the repository root:
+
+```dotenv
+GCLOUD_URI=gs://sa-firms/firms
+GCLOUD_PRIVATE_URI=gs://your-private-bucket/firms-operations
+```
+
+The destinations need distinct, non-overlapping prefixes. For a single
+bucket, use separately permissioned managed folders and grant readers access
+only to the dataset folder. A bucket-wide public grant would expose both
+prefixes. The pipeline uses the permissions already configured in GCS.
+The authenticated Google Cloud CLI must be able to create and read objects
+at both prefixes and replace the public annual files and collection.
+Replacing an object requires `storage.objects.create` and
+`storage.objects.delete`. The NASA key comes from `FIRMS_MAP_KEY` or
+`FIRMS_API_KEY`.
+
+The pipeline uses the DuckDB community H3 extension. Install it once from
+the project Python environment if it is absent:
+
+```bash
+python -c "import duckdb; duckdb.connect().execute('INSTALL h3 FROM community')"
+```
+
+Run ingestion and upload together:
+
+```bash
+python -m src.cloud --start-date 2026-01-01 --end-date 2026-01-31
+```
+
+The command uses a temporary work directory for conversion and aggregation
+and removes it on exit. GCS holds the persistent outputs. Live JSON logs
+on stderr show download and processing progress, request-budget waits, HTTP
+retries, and GCS uploads. The private run log records these events through
+publication or failure. The request bbox
+can be set with `--bbox`. Each run adds its years to the existing collection.
+
+```text
+AGENTS.md
+README.md
+catalog.json
+occurrences/
+  collection.json
+  year=2026/
+    2026.json
+    occurrences.parquet
+    aggregate-l0.parquet
+    aggregate-l4.parquet
+```
+
+The annual Items include observation coverage, request dates, source products,
+and GCS URIs. The aggregate assets contain WGS 84 H3 cell polygons in the
+`geom` column. Each row includes the year, H3 index, detection count, and FRP
+count, sum, average, and maximum. For a cell without measured FRP the FRP
+count is zero and the other FRP metrics are null.
+
+The private prefix holds SHA-256-verified normalized chunks and completion
+markers under `chunks/`. Each run records its start under `runs/<run-id>/`.
+Completed and handled failed runs upload `events.ndjson` and `manifest.json`
+there. On an interrupted run, already committed chunks are available on retry.
+Chunk payloads are uploaded before their completion markers. The run saves
+a private publication record and uploads the root catalog after the assets,
+Items, and collection are available. Annual files use fixed public names.
+Each replacement has a GCS generation precondition. The pipeline writes the
+Parquet assets before the annual Item and updates the collection last. It
+backs up changed objects under the private run's `annual-backup/` prefix
+before replacement and attempts to restore them on a handled failure. GCS
+cannot switch several fixed-name objects atomically, so readers can see
+mixed generations during publication or after an abrupt interruption.
+The annual Item records completed request intervals per product in
+`firms:coverage`. Overlapping requests skip those days, and a retry checks the
+private cache for each remaining request chunk.
+
+Extending a year verifies the previous occurrences checksum, merges the new
+observations, and recomputes the aggregates from the merged table. A fetched
+product and UTC date replace the previous rows for that product and day, so
+a first update from a legacy Item without coverage metadata can safely
+reprocess overlap. Years previously published with versioned Item paths move
+to flat paths when extended. Existing objects at the old paths are retained.
+Run one publisher at a time for a given dataset. Previously committed chunks
+are available for retry.
 
 ```bash
 python -m unittest discover -s tests -v

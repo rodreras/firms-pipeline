@@ -1,10 +1,14 @@
 import io
 import unittest
+import tempfile
+from contextlib import redirect_stderr
+from pathlib import Path
 from datetime import date
 from urllib.error import HTTPError
 from unittest.mock import patch
 
 from src.firms_http import FirmsClient, FirmsError
+from src.logs import run_logging
 
 
 class FirmsHttpTests(unittest.TestCase):
@@ -13,6 +17,9 @@ class FirmsHttpTests(unittest.TestCase):
         status_clear = b'{"current_transactions": 0, "transaction_limit": 5000}'
         rate_limit = HTTPError("test URL", 429, "", {"Retry-After": "17"}, io.BytesIO())
         with (
+            tempfile.TemporaryDirectory() as work,
+            run_logging(Path(work) / "log.ndjson"),
+            redirect_stderr(io.StringIO()) as stderr,
             patch("src.firms_http.urlopen", side_effect=[
                 io.BytesIO(status_full), io.BytesIO(status_clear), rate_limit,
                 io.BytesIO(status_clear), io.BytesIO(b"payload")
@@ -21,6 +28,10 @@ class FirmsHttpTests(unittest.TestCase):
         ):
             client = FirmsClient("test-key", 5000)
             self.assertEqual(client.area("MODIS_SP", "bbox", date(2026, 1, 1), 5), b"payload")
+        self.assertIn('"event": "firms_budget_wait"', stderr.getvalue())
+        self.assertIn('"reason": "HTTP 429"', stderr.getvalue())
+        self.assertIn('"level": "WARNING"', stderr.getvalue())
+        self.assertNotIn("test-key", stderr.getvalue())
         self.assertEqual(request.call_count, 5)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [60, 17])
 

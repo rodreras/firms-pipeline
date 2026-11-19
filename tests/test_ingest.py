@@ -41,6 +41,48 @@ class IngestTests(unittest.TestCase):
             self.chunk, Chunk("MODIS_SP", date(2026, 1, 6), 2)
         ])
 
+    def test_custom_window_preserves_bbox_and_splits_at_year_boundary(self):
+        start, end = date(2025, 12, 30), date(2026, 1, 3)
+        bbox = "-70,-20,-50,0"
+        self.assertEqual(list(plan_chunks({"MODIS_SP": (start, end)}, start, end, bbox)), [
+            Chunk("MODIS_SP", start, 2, bbox),
+            Chunk("MODIS_SP", date(2026, 1, 1), 3, bbox),
+        ])
+
+    def test_offline_import_verifies_csv_and_preserves_download_time(self):
+        import hashlib
+
+        raw = self.output / "raw"
+        runs = raw / "runs"
+        runs.mkdir(parents=True)
+        csv = raw / "firms.csv"
+        csv.write_bytes(self.body)
+        manifest_path = runs / "raw.json"
+        chunk = {
+            **self.chunk.reference(),
+            "outcome": "complete",
+            "output": csv.name,
+            "byte_size": len(self.body),
+            "sha256": hashlib.sha256(self.body).hexdigest(),
+            "downloaded_at": "2026-11-18T21:39:09+00:00",
+        }
+        manifest_path.write_text(json.dumps({
+            **self.chunk.reference(),
+            "requested_end": "2026-01-31",
+            "outcome": "complete",
+            "chunks": [chunk],
+        }))
+        published = self.output / "published"
+        result = run(published, None, refresh=False, csv_manifest=manifest_path)
+        self.assertEqual(result["chunks"][0]["downloaded_at"], chunk["downloaded_at"])
+        self.assertEqual(result["publication"]["assets"][0]["rows"], 1)
+        root = published / result["publication"]["catalog"]
+        original = root.read_bytes()
+        csv.write_bytes(self.body.replace(b"-60", b"-61"))
+        with self.assertRaisesRegex(RuntimeError, "CSV checksum or size mismatch"):
+            run(published, None, refresh=False, csv_manifest=manifest_path)
+        self.assertEqual(root.read_bytes(), original)
+
     def test_verified_chunk_is_skipped_and_corruption_is_repaired(self):
         status, record = self.download()
         self.assertEqual(status, "downloaded")
@@ -149,6 +191,8 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(parquet.metadata.row_group(0).column(0).compression, "ZSTD")
         geo = json.loads(parquet.schema_arrow.metadata[b"geo"])
         self.assertEqual(geo["version"], "1.1.0")
+        self.assertEqual(item.bbox, [-61.0, -11.0, -60.0, -10.0])
+        self.assertEqual(geo["columns"]["geom"]["bbox"], item.bbox)
         frame = gpd.read_parquet(asset)
         self.assertEqual(frame.crs.to_epsg(), 4326)
         self.assertEqual(frame.geometry.iloc[0].geom_type, "Point")

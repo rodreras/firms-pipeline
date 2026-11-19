@@ -58,7 +58,8 @@ Read the repository README, existing tests, configuration, and relevant source f
 - Skip identical completed work when safe; distinguish changed source bytes, retries, corrections, and reprocessing.
 - Use deterministic merge/deduplication rules for the annual datasets; test reruns, overlapping date windows, and corrected upstream data.
 - A failed or interrupted job must not publish incomplete datasets as current.
-
+- Despite the SHA-256 being a must-have, it should not interfer in incrementing information in the catalog.json or in the `occurrences.parquet` or `YYYY.json`. Imagine a scenario where we download all the data for 2026 but December. When we run it, the software must be capable of appending the metadata, the data and information for the `catalog.json`, `collection.json`, and `ocurrences.parquet`. The stats must be updated.
+- The bucket storage structure must be respected at all costs.
 ## Validation and geospatial processing
 
 - Validate source schemas per product/version; reject or quarantine malformed rows with recorded reasons.
@@ -78,6 +79,27 @@ Read the repository README, existing tests, configuration, and relevant source f
 - GCS does not provide a transaction across multiple objects. Keep the published catalog and assets mutually consistent by publishing immutable assets first and switching a stable catalog pointer or entry point last.
 - Do not delete prior published versions during a release. Define retention and cleanup separately.
 - Make publishing safe against concurrent daily jobs, retries, and partial failures.
+- The structure of the bucket must be:
+
+```bash
+firms/ #public
+    AGENTS.md
+    README.md
+    catalog.json
+    occurrences/
+        collection.json
+        year=YYYY/
+            YYYY.json
+            occurrences.parquet
+            aggregate-l0.parquet
+            aggregate-l4.parquet
+logs/ #private
+    chunks/
+        schema-1/
+    runs/
+        sha256-01/
+        sha256-02/
+```
 
 ## H3 aggregation
 

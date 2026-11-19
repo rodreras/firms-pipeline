@@ -11,6 +11,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import urlopen
 
+from src.logs import event
+
 BASE_URL = "https://firms.modaps.eosdis.nasa.gov"
 MAX_ATTEMPTS = 5
 
@@ -29,12 +31,13 @@ class FirmsClient:
         self._path_key = quote(map_key, safe="")
         self._limit = transaction_limit
 
-    def _request(self, path: str, *, reserve: int = 0) -> bytes:
+    def _request(self, path: str, *, reserve: int = 0, operation: str = "budget_status") -> bytes:
         for attempt in range(MAX_ATTEMPTS):
             if reserve:
                 self._wait_for_budget(reserve)
 
             retry_after = 0
+            event("firms_request_started", operation=operation, attempt=attempt + 1)
             try:
                 with urlopen(BASE_URL + path, timeout=60) as response:
                     body = response.read()
@@ -45,24 +48,31 @@ class FirmsClient:
                 ):
                     raise FirmsError("FIRMS rejected the MAP key")
                 if b"transaction limit" not in message:
+                    event("firms_request_finished", operation=operation, bytes=len(body))
                     return body
+                reason = "transaction_limit_response"
                 retry_after = 60
             except HTTPError as error:
                 with error:
                     if error.code not in {429, 500, 502, 503, 504}:
                         raise FirmsError(f"FIRMS returned HTTP {error.code}") from None
+                    reason = f"HTTP {error.code}"
                     if error.code == 429:
                         value = error.headers.get("Retry-After", "")
                         retry_after = int(value) if value.isascii() and value.isdecimal() else 60
-            except (URLError, TimeoutError, OSError):
-                pass
+            except (URLError, TimeoutError, OSError) as error:
+                reason = type(error).__name__
 
             if attempt + 1 < MAX_ATTEMPTS:
                 if retry_after > 600:
                     raise FirmsError("FIRMS requested a retry beyond the local wait limit")
-                time.sleep(max(retry_after, 2**attempt + random.random()))
+                wait = max(retry_after, 2**attempt + random.random())
+                event("firms_request_retry", level="WARNING", operation=operation, reason=reason,
+                      attempt=attempt + 1, max_attempts=MAX_ATTEMPTS, wait_seconds=round(wait, 2))
+                time.sleep(wait)
 
-        raise FirmsError("FIRMS request failed after bounded retries")
+        event("firms_retries_exhausted", level="ERROR", operation=operation, reason=reason)
+        raise FirmsError(f"FIRMS {operation} failed after {MAX_ATTEMPTS} attempts ({reason})")
 
     def _wait_for_budget(self, reserve: int) -> None:
         query = urlencode({"MAP_KEY": self._key})
@@ -77,13 +87,18 @@ class FirmsClient:
             except (KeyError, TypeError, ValueError):
                 raise FirmsError("FIRMS returned invalid transaction status") from None
             if used + reserve <= limit:
+                event("firms_budget_available", used=used, limit=limit, remaining=limit - used,
+                      reserve=reserve)
                 return
             if check < 10:
+                event("firms_budget_wait", level="WARNING", used=used, limit=limit, reserve=reserve,
+                      check=check + 1, wait_seconds=60)
                 time.sleep(60)
+        event("firms_budget_exhausted", level="ERROR", used=used, limit=limit, reserve=reserve)
         raise FirmsError("FIRMS transaction budget did not recover")
 
     def availability(self) -> dict[str, tuple[date, date]]:
-        body = self._request(f"/api/data_availability/csv/{self._path_key}/ALL", reserve=36)
+        body = self._request(f"/api/data_availability/csv/{self._path_key}/ALL", reserve=36, operation="availability")
         try:
             rows = csv_rows(body)
             header = next(rows)
@@ -107,4 +122,4 @@ class FirmsClient:
     def area(self, source: str, bbox: str, start: date, days: int) -> bytes:
         path = f"/api/area/csv/{self._path_key}/{source}/{bbox}/{days}/{start}"
         # The reference project measured 36 transactions per day for the world.
-        return self._request(path, reserve=36 * days)
+        return self._request(path, reserve=36 * days, operation="area_download")
