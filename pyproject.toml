@@ -1,0 +1,24 @@
+[project]
+name = "firms-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "duckdb>=1.5.6",
+    "folium>=0.20.0",
+    "geopandas>=1.2.0",
+    "geoparquet-io>=1.7.0",
+    "leafmap>=0.63.1",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "pandas>=3.0.6",
+    "pydantic-settings>=2.16.1",
+    "pystac>=1.15.2",
+    "rashid>=0.3.0",
+    "scipy>=1.18.1",
+    "stac-check>=1.14.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
