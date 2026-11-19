@@ -29,17 +29,17 @@ Read the repository README, existing tests, configuration, and relevant source f
 
 ## Scope and architecture
 
-- Geographic area of interest: South America. Define and test the exact geographic inclusion rule; do not silently substitute a bounding rectangle for political boundaries.
+- Geographic area of interest: South America. The implemented inclusion rule is the FIRMS request bounding box, defaulting to `-82.44,-56.46,-34.10,13.58` in west, south, east, north order. A change to political boundaries requires owner approval.
 - Source: NASA FIRMS, covering available satellite/product families and their actual periods of availability. Do not assume every satellite has observations dating back to 2000.
 - Historical backfill: from 2000 through the latest available date, subject to source availability and approval for bulk execution.
-- Incremental operation: fetch newly available observations daily, including a configurable lookback for late or corrected data.
-- Runtime: Python jobs with explicit source/product, region, and date-range inputs, suitable for local execution and GitHub Actions.
+- Incremental operation: run `python -m src.cloud` with an inclusive date range and optional `--bbox`. The job selects configured products using FIRMS availability. Scheduled daily execution and a correction lookback require separate implementation and approval.
+- Runtime: Python jobs suitable for local execution and GitHub Actions. Cloud runs use temporary storage and retain persistent outputs in GCS. The documented local ingestion command supports offline CSV imports.
 - Cloud destination: Google Cloud Storage (GCS).
 - Published observations: one GeoParquet object per calendar-year partition, with separate STAC metadata and ingestion manifests.
-- Catalog: STAC Catalog, South America FIRMS Collection, and yearly Items/assets, generated and validated using Portolan CLI where supported.
+- Catalog: PySTAC generates the root Catalog, occurrences Collection, and annual Items. Local tests check the generated links and asset metadata.
 - Derived aggregation: H3 cells for fire-detection summaries. Preserve original observation points separately.
 - No medallion architecture, BigQuery, Airflow, Kubernetes, or always-on services by default.
-- All generated files must be cloud native. Prefer always Parquet when it comes to tabular data. 
+- All generated files must be cloud native. Use Parquet for tabular data.
 
 ## Ingestion and rate limits
 
@@ -56,62 +56,67 @@ Read the repository README, existing tests, configuration, and relevant source f
 - Establish stable logical ingestion keys from source/product, region, date or interval, and relevant version identifiers.
 - Persist a machine-readable manifest for each run with run ID, source/product, region, requested dates, source URL or reference, download timestamp, SHA-256, byte size, source row count, accepted/rejected counts, code version/commit SHA, outputs, and outcome.
 - Skip identical completed work when safe; distinguish changed source bytes, retries, corrections, and reprocessing.
-- Use deterministic merge/deduplication rules for the annual datasets; test reruns, overlapping date windows, and corrected upstream data.
-- A failed or interrupted job must not publish incomplete datasets as current.
-- Despite the SHA-256 being a must-have, it should not interfer in incrementing information in the catalog.json or in the `occurrences.parquet` or `YYYY.json`. Imagine a scenario where we download all the data for 2026 but December. When we run it, the software must be capable of appending the metadata, the data and information for the `catalog.json`, `collection.json`, and `ocurrences.parquet`. The stats must be updated.
-- The bucket storage structure must be respected at all costs.
+- Key private cached chunks by schema version, region, request bbox, product, and interval. Write each checksummed normalized chunk before its completion marker. Verify both checksum and size before reuse.
+- Use the annual Item's `firms:coverage` to skip completed product-day intervals. For newly fetched product-days, replace matching rows in the previous year and preserve the remaining rows. Recompute H3 summaries from the merged year. Legacy Items without coverage can reprocess overlapping days through this same merge.
+- SHA-256 verifies downloaded, cached, and published bytes. Changed annual outputs use generation-checked replacements at their existing public paths.
+
 ## Validation and geospatial processing
 
-- Validate source schemas per product/version; reject or quarantine malformed rows with recorded reasons.
+- Validate source schemas for supported products. Ingestion fails the chunk and reports the source and row number when it encounters malformed input.
 - Validate latitude and longitude ranges, timestamp parsing, required fields, and confidence values according to the relevant FIRMS product semantics. Do not assume confidence is encoded identically across satellites.
 - Build point geometry from source coordinates with explicit CRS, normally WGS 84 (EPSG:4326) when appropriate.
 - Preserve source attributes and document normalized field names, units, nullability, and transformations.
-- Write valid GeoParquet with geometry metadata, CRS, encoding, compression, and geometry-type information.
+- The current writer uses GeoParquet 1.1, WKB geometry, WGS 84, and Zstandard compression. Occurrences include row-level bbox metadata and use Hilbert spatial ordering.
 - Target GeoParquet 2.0 only when the installed writers, validators, and selected metadata extensions support it; verify compliance rather than inventing metadata.
 - Include row-level bounding boxes or a supported bbox column when required by the chosen specification and query plan. Validate spatial filtering with DuckDB.
-- Evaluate Hilbert spatial ordering against unsorted output with realistic benchmarks before making it mandatory.
 - Partition by observation year; the published contract is one GeoParquet per year. Do not append raw bytes to existing Parquet objects. Use a deterministic rewrite/merge or another explicitly approved safe update strategy.
 
 ## GCS publishing and consistency
 
-- Stage newly produced objects under immutable or run-specific keys, validate them, then publish the completed version.
-- Use GCS generation preconditions or equivalent optimistic concurrency control to prevent lost updates.
-- GCS does not provide a transaction across multiple objects. Keep the published catalog and assets mutually consistent by publishing immutable assets first and switching a stable catalog pointer or entry point last.
-- Do not delete prior published versions during a release. Define retention and cleanup separately.
-- Make publishing safe against concurrent daily jobs, retries, and partial failures.
-- The structure of the bucket must be:
+- Configure the public dataset root with `GCLOUD_URI` and the private operations root with `GCLOUD_PRIVATE_URI`. The prefixes must be distinct and non-overlapping. Use GCS IAM to restrict the private prefix.
+- Stage and validate the complete output locally before publication. Keep the annual public paths fixed. Back up replaced objects to the private run prefix before overwriting them, then use generation preconditions for each replacement.
+- Write the annual Parquet files before the annual Item, update the Collection after the annual Items, and upload the root Catalog last. The Collection keeps one current Item per year.
+- Run one publisher at a time for a given dataset. GCS writes are atomic per object. Readers can see mixed generations during a multi-file update or after an abrupt interruption. The pipeline attempts rollback on handled failures, and private backups are available for recovery.
+- Retain existing legacy objects and private backups. Cleanup and retention require a separate decision.
 
-```bash
-firms/ #public
-    AGENTS.md
-    README.md
-    catalog.json
-    occurrences/
-        collection.json
-        year=YYYY/
-            YYYY.json
-            occurrences.parquet
-            aggregate-l0.parquet
-            aggregate-l4.parquet
-logs/ #private
-    chunks/
-        schema-1/
-    runs/
-        sha256-01/
-        sha256-02/
+```text
+firms/                                  # public dataset root
+  AGENTS.md
+  README.md
+  catalog.json
+  occurrences/
+    collection.json
+    year=YYYY/
+      YYYY.json
+      occurrences.parquet
+      aggregate-l0.parquet
+      aggregate-l4.parquet
+logs/                                   # example private operations root
+  chunks/
+    schema-1/
+      <region>/<bbox>/<product>/<interval>/
+        <sha256>.parquet
+        complete.json
+  runs/
+    <run-id>/
+      started.json
+      ready.json                        # when publication reaches the ready phase
+      events.ndjson
+      manifest.json
+      annual-backup/                    # when existing annual objects are replaced
 ```
 
 ## H3 aggregation
 
 - Generate H3 summaries as derived products, not replacements for raw detection points.
-- H3 resolution, grouping dimensions, aggregation measures, and treatment of repeated detections require explicit owner approval.
+- The current aggregates use resolutions 0 and 4, grouped by H3 cell and UTC observation year. The `geom` column stores WGS 84 cell polygons. Measures are detection count and FRP count, sum, average, and maximum. Missing FRP is excluded from FRP statistics. A group with no measured FRP has an FRP count of zero and null sum, average, and maximum. Changes to resolutions, grouping, or measures require owner approval.
 - Validate spatial assignment and counts against source observations; document that detection counts are not automatically unique fires or burned area.
 
 ## STAC and Portolan
 
 - Generate a discoverable STAC Catalog and a South America FIRMS Collection, with yearly Items/assets reflecting the published partition structure.
 - Include valid spatial/temporal extents, provider, license, summary, description, asset links, column descriptions, and provenance.
-- Use Portolan CLI for generation and validation where it supports the required schema. Inspect the installed CLI version and commands before invoking them; do not invent flags.
+- Preserve the approved flat layout for Portolan consumers. Use the available Portolan CLI for validation where supported. Inspect the installed CLI before invoking it and claim conformance only after verification.
 - Validate STAC structure and links, GeoParquet metadata, and regional bbox queries with DuckDB and the available Portolan tooling.
 - Maintain a dataset-facing `AGENTS.md` only if it provides useful instructions for external agents to discover, interpret, and query the published dataset. Keep that separate from this repository's development instructions.
 - Provide tested DuckDB examples for spatial and temporal filtering; do not publish unverified queries.
