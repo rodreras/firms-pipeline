@@ -51,6 +51,14 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT || secrets.GCP_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v3
+      - name: Check secrets
+        env:
+          A: ${{ secrets.FIRMS_MAP_KEY }}
+          B: ${{ secrets.GCLOUD_URI }}
+        run: |
+          echo "FIRMS_MAP_KEY set: ${A:+yes}"
+          echo "GCLOUD_URI set: ${B:+yes}"
+          
       - name: Ingest and publish
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
