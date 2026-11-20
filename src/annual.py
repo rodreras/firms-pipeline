@@ -56,5 +56,25 @@ def merge_observations(
             pc.equal(old["source"], source),
             pc.is_in(old["acq_date"], value_set=pa.array(sorted(days), type=pa.date32())),
         )
-        keep = pc.and_(keep, pc.invert(replace))
+        keep = pc.and_(keep, pc.invert(pc.fill_null(replace, False)))
     return pa.concat_tables([old.filter(keep), new])
+
+
+def with_empty_dates(table: pa.Table, requested: set[date]) -> tuple[pa.Table, set[date]]:
+    """Keep one date-only row per requested day without a detection."""
+    previous_empty = set()
+    detections = table
+    if table["longitude"].null_count:
+        empty = table["longitude"].is_null()
+        previous_empty = set(table["acq_date"].filter(empty).to_pylist())
+        detections = table.filter(pc.invert(empty))
+    observed = set(pc.unique(detections["acq_date"]).to_pylist())
+    missing = requested - observed
+    empty_dates = missing | (previous_empty - observed)
+    if not empty_dates:
+        return detections, missing
+    placeholders = pa.Table.from_pylist(
+        [{"acq_date": day} for day in sorted(empty_dates)],
+        schema=table.schema,
+    )
+    return pa.concat_tables([detections, placeholders]), missing
