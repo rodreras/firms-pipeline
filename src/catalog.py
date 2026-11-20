@@ -16,7 +16,7 @@ from pystac.extensions.table import Column, TableExtension
 from shapely.geometry import MultiPoint, mapping
 
 from src.local_files import atomic_write
-from src.normalize import COLUMNS, COVERING, GEOMETRY, geoparquet
+from src.normalize import COLUMNS, COVERING, GEOMETRY, OBSERVATION_SCHEMA, geoparquet
 
 PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
 
@@ -36,22 +36,30 @@ def yearly_asset(table: pa.Table, year: int, start: date, end: date) -> tuple[by
     bbox = footprint = None
     first = datetime.combine(start, time.min, timezone.utc)
     last = datetime.combine(end, time.max, timezone.utc)
-    if len(table):
-        longitude = pc.min_max(table["longitude"]).as_py()
-        latitude = pc.min_max(table["latitude"]).as_py()
+    empty = None
+    detections = table
+    if table["longitude"].null_count:
+        empty = table["longitude"].is_null()
+        detections = table.filter(pc.invert(empty))
+    if len(detections):
+        longitude = pc.min_max(detections["longitude"]).as_py()
+        latitude = pc.min_max(detections["latitude"]).as_py()
         bbox = [longitude["min"], latitude["min"], longitude["max"], latitude["max"]]
         footprint = mapping(MultiPoint([
             (bbox[0], bbox[1]), (bbox[0], bbox[3]), (bbox[2], bbox[1]), (bbox[2], bbox[3]),
         ]).convex_hull)
-        points = gpd.GeoSeries(gpd.points_from_xy(table["longitude"], table["latitude"], crs=4326))
+        points = gpd.GeoSeries(gpd.points_from_xy(detections["longitude"], detections["latitude"], crs=4326))
         hilbert = pa.array(points.hilbert_distance(total_bounds=[-180, -90, 180, 90]))
-        ordered = table.append_column("_hilbert", hilbert)
+        ordered = detections.append_column("_hilbert", hilbert)
         indices = pc.sort_indices(ordered, sort_keys=[
             ("_hilbert", "ascending"), ("acquired_at", "ascending"),
             ("source", "ascending"), ("longitude", "ascending"), ("latitude", "ascending"),
         ])
-        table = table.take(indices)
-        times = pc.min_max(table["acquired_at"]).as_py()
+        sorted_detections = detections.take(indices)
+        table = sorted_detections if empty is None else pa.concat_tables([
+            sorted_detections, table.filter(empty),
+        ])
+        times = pc.min_max(detections["acquired_at"]).as_py()
         first, last = times["min"], times["max"]
     item = pystac.Item(
         id=f"firms-sa-{year}", geometry=footprint, bbox=bbox, datetime=None,
@@ -81,6 +89,10 @@ def publish_catalog(output: Path, manifest: dict) -> dict:
         table = pq.ParquetFile(output / chunk["output"]).read().drop([GEOMETRY, COVERING])
         year = date.fromisoformat(chunk["requested_start"]).year
         by_year[year].append(table)
+    for day in manifest.get("unavailable_dates", []):
+        year = date.fromisoformat(day).year
+        if year not in by_year:
+            by_year[year].append(OBSERVATION_SCHEMA.empty_table())
 
     assets = {}
     for year, tables in sorted(by_year.items()):
