@@ -12,6 +12,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Local documentation
+/docs/
+
 # Local raw downloads and run manifests
 /outputs/firms-raw/
 outputs/
