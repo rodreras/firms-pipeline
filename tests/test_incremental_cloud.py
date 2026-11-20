@@ -65,7 +65,7 @@ class MemoryGCS:
         return result()
 
 
-class IncrementalCloudTests(unittest.TestCase):
+class CloudPublicationFixture(unittest.TestCase):
     def setUp(self):
         self.store = MemoryGCS()
         self.public = "gs://test/firms"
@@ -136,6 +136,8 @@ class IncrementalCloudTests(unittest.TestCase):
             .to_pylist()
         )
 
+
+class IncrementalCloudTests(CloudPublicationFixture):
     def test_add_year_then_extend_with_overlap_and_retry(self):
         self.publish("2020-12-31", "2020-12-31")
         self.publish("2021-11-18", "2021-11-19")
