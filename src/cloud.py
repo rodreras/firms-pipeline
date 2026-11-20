@@ -157,6 +157,7 @@ def publish_run(
                     manifest = run(
                         output, client, refresh=False, start_date=start_date, end_date=end_date,
                         bbox=bbox, cache=GCSChunkCache(private), covered_days=covered, run_id=run_id,
+                        publish_empty_dates=True,
                     )
                     staged = output / "publication"
                     years = [asset["year"] for asset in manifest["publication"]["assets"]]
@@ -174,15 +175,16 @@ def publish_run(
                     else:
                         staged.mkdir()
                         files = [stage_root(staged)]
+                backup_uri = cloud_uri(private, report / "annual-backup")
                 manifest["cloud_publication"] = {
                     "catalog": f"{destination}/catalog.json",
                     "objects": [cloud_uri(destination, path) for path in files],
+                    "annual_backup_prefix": backup_uri,
                     "outcome": "staged",
                 }
                 if years:
                     metadata = [path for path in files[:-1] if path.parts[0] != "occurrences"]
                     annual = [path for path in files if path.parts[0] == "occurrences" and path != COLLECTION_PATH]
-                    upload_dataset(staged, destination, metadata)
                     expected = {}
                     for year in years:
                         if year not in prior_items:
@@ -194,17 +196,18 @@ def publish_run(
                                 if digest := asset.get("firms:sha256"):
                                     expected[item_path.parent / asset["href"]] = digest
                             expected[item_path.with_name("occurrences.parquet")] = sha256(previous[year][1])
-                    backup_uri = cloud_uri(private, report / "annual-backup")
-                    manifest["cloud_publication"]["annual_backup_prefix"] = backup_uri
                     with update_annual_objects(
-                        staged, destination, annual, expected, backup_destination=backup_uri,
+                        staged, destination, metadata + annual, expected, backup_destination=backup_uri,
                     ):
                         publish_collection(
                             staged, destination, expected_items={year: links.get(year) for year in years},
                         )
                 write_json(output / report / "ready.json", manifest)
                 upload_dataset(output, private, [report / "ready.json"])
-                upload_dataset(staged, destination, files[-1:])
+                with update_annual_objects(
+                    staged, destination, files[-1:], {}, backup_destination=backup_uri,
+                ):
+                    pass
                 manifest["cloud_publication"]["outcome"] = "complete"
                 event("catalog_published", run_id=run_id, objects=len(files))
             except (Exception, KeyboardInterrupt) as error:
