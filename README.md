@@ -168,7 +168,7 @@ these GitHub environment secrets before dispatching either workflow.
 
 | Secret | Value |
 | --- | --- |
-| `FIRMS_MAP_KEY` | NASA FIRMS MAP key |
+| `FIRMS_MAP_KEY` or `FIRMS_API_KEY` | NASA FIRMS MAP key |
 | `GCLOUD_URI` | Public GCS dataset root |
 | `GCLOUD_PRIVATE_URI` | Private GCS cache, manifests, and backups root |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full Google Cloud workload identity provider resource name |
@@ -178,6 +178,8 @@ Configure Google Cloud Workload Identity Federation to allow the trusted
 repository and ref to impersonate that account. Restrict deployment refs in
 the GitHub environment and give the account only the permissions needed on
 the two GCS prefixes described above.
+The two `GCP_` identifiers can also be set as `firms-production` environment
+variables. A variable takes precedence over a secret with the same name.
 
 - **FIRMS historical backfill** runs on manual dispatch. The defaults are
   January 1, 2000 through the UTC date the workflow was created, inclusive.
