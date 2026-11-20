@@ -7,6 +7,7 @@ import math
 from datetime import date, datetime, time, timezone
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pyproj import CRS
 from shapely import points, to_wkb
@@ -39,6 +40,7 @@ COLUMNS = [
 ]
 GEOMETRY = "geom"
 COVERING = "bbox"
+OBSERVATION_SCHEMA = pa.schema([(name, dtype) for name, dtype, _ in COLUMNS])
 
 
 def numeric(value: str) -> float | None:
@@ -101,19 +103,27 @@ def normalize(body: bytes, source: str, start: date, end: date) -> pa.Table:
             })
     except (StopIteration, csv.Error, ValueError, OverflowError):
         raise ValueError(f"Invalid FIRMS {source} schema or values at row {row_number}") from None
-    return pa.Table.from_pylist(observations, schema=pa.schema([
-        (name, dtype) for name, dtype, _ in COLUMNS
-    ]))
+    return pa.Table.from_pylist(observations, schema=OBSERVATION_SCHEMA)
 
 
 def geoparquet(table: pa.Table, bbox: list[float] | None = None) -> bytes:
-    longitude = table["longitude"].to_numpy()
-    latitude = table["latitude"].to_numpy()
-    geometry_wkb = pa.array(to_wkb(points(longitude, latitude)), type=pa.binary())
+    longitude = table["longitude"].combine_chunks()
+    latitude = table["latitude"].combine_chunks()
+    missing = pc.or_(longitude.is_null(), latitude.is_null())
+    geometry_wkb = pa.array(
+        to_wkb(points(
+            longitude.to_numpy(zero_copy_only=False),
+            latitude.to_numpy(zero_copy_only=False),
+            handle_nan="skip",
+        )),
+        type=pa.binary(),
+    )
+    geometry_wkb = pc.if_else(missing, pa.scalar(None, type=pa.binary()), geometry_wkb)
     table = table.append_column(GEOMETRY, geometry_wkb)
     bounds = pa.StructArray.from_arrays(
-        [pa.array(longitude), pa.array(latitude), pa.array(longitude), pa.array(latitude)],
+        [longitude, latitude, longitude, latitude],
         names=["xmin", "ymin", "xmax", "ymax"],
+        mask=missing,
     )
     table = table.append_column(COVERING, bounds)
     geometry = {
