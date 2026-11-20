@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import shutil
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -14,9 +13,10 @@ import pystac
 from pyproj import CRS
 from shapely import from_wkt, to_wkb, total_bounds
 
-from src.annual import chunk_coverage, compact_coverage, item_coverage, merge_observations
+from src.annual import chunk_coverage, compact_coverage, item_coverage, merge_observations, with_empty_dates
 from src.catalog import PARQUET_MEDIA_TYPE, save_bytes, save_stac, yearly_asset
 from src.logs import event
+from src.normalize import COVERING, GEOMETRY
 
 RESOLUTIONS = (4,5)
 SUMMARY_COLUMNS = {
@@ -38,6 +38,10 @@ aggregate-l4.parquet and aggregate-l5.parquet (polygon GeoParquet grouped
 by H3 cell and UTC observation year). The Item records the processed date range and source
 products. A year directory can cover a partial year.
 
+Requested dates with no detections have a date-only row in occurrences.parquet.
+Use acq_date to include those dates, or filter with geom IS NOT NULL to count
+only detections. H3 summaries exclude date-only rows.
+
 detection_count includes all detections, and frp_count includes only detections
 with an FRP value. frp_sum, frp_avg, and frp_max use measured FRP in megawatts
 and are null when the group has no measured FRP. Detections from different
@@ -51,6 +55,7 @@ Use the Item's temporal coverage and firms:requested_start and
 firms:requested_end when comparing annual partitions. For occurrences use
 acquired_at and the longitude and latitude columns for filtering. For H3
 summaries select one resolution. See README.md for the measures and units.
+Use acq_date for date-only rows and geom IS NOT NULL for detections.
 """
 
 
@@ -79,6 +84,7 @@ def aggregate(connection: duckdb.DuckDBPyConnection, path: Path, resolution: int
             SELECT CAST(year(acq_date) AS INTEGER) AS year,
                    h3_latlng_to_cell(latitude, longitude, ?) AS h3_cell, frp
             FROM read_parquet(?, hive_partitioning = false)
+            WHERE latitude IS NOT NULL AND longitude IS NOT NULL
         )
         GROUP BY year, h3_cell
         ORDER BY year, h3_cell
@@ -117,23 +123,23 @@ def stage_dataset(
     collection_path = Path("occurrences/collection.json")
     collection = None
     files = []
+    unavailable = {date.fromisoformat(day) for day in manifest.get("unavailable_dates", [])}
     for record in sorted(assets, key=lambda asset: asset["year"]):
         year = record["year"]
         parquet = (source / record["path"]).resolve()
         if not parquet.is_relative_to(source) or sha256(parquet) != record["sha256"]:
             raise ValueError(f"Invalid annual Parquet input for {year}")
-        item = pystac.Item.from_file(str(parquet.with_suffix(".json")))
         if collection is None:
             collection = pystac.Collection.from_file(str(parquet.parent.parent / "collection.json"))
             collection.clear_links()
         year_chunks = [chunk for chunk in manifest["chunks"] if chunk["requested_start"][:4] == str(year)]
         new_coverage = chunk_coverage(year_chunks)
         coverage = {source: days.copy() for source, days in new_coverage.items()}
-        first = min(chunk["requested_start"] for chunk in year_chunks)
-        last = max(chunk["requested_end"] for chunk in year_chunks)
+        requested = {day for day in unavailable if day.year == year}
+        requested.update(day for days in new_coverage.values() for day in days)
+        first, last = min(requested).isoformat(), max(requested).isoformat()
         products = set(new_coverage)
         previous = (previous_years or {}).get(year)
-        rebuilt = None
         if previous is not None:
             prior_item, prior_parquet = previous
             properties = prior_item["properties"]
@@ -143,8 +149,14 @@ def stage_dataset(
             for product, days in item_coverage(properties).items():
                 coverage.setdefault(product, set()).update(days)
             observations = merge_observations(prior_parquet, parquet, new_coverage, year)
-            rebuilt, item = yearly_asset(observations, year, date.fromisoformat(first), date.fromisoformat(last))
-            item.collection_id = collection.id
+        else:
+            observations = pq.ParquetFile(parquet).read().drop([GEOMETRY, COVERING])
+        observations, missing = with_empty_dates(observations, requested)
+        if missing:
+            event("firms_dates_without_detections", level="WARNING", year=year,
+                  dates=[day.isoformat() for day in sorted(missing)])
+        rebuilt, item = yearly_asset(observations, year, date.fromisoformat(first), date.fromisoformat(last))
+        item.collection_id = collection.id
 
         item.clear_links()
         item.id = str(year)
@@ -160,10 +172,7 @@ def stage_dataset(
         target_dir = output / partition
         target_dir.mkdir(parents=True, exist_ok=True)
         occurrences_path = partition / "occurrences.parquet"
-        if rebuilt is None:
-            shutil.copyfile(parquet, output / occurrences_path)
-        else:
-            save_bytes(output / occurrences_path, rebuilt)
+        save_bytes(output / occurrences_path, rebuilt)
 
         occurrences = item.assets["data"]
         occurrences.href = "./occurrences.parquet"
