@@ -22,3 +22,4 @@ jobs:
       mode: backfill
       start_date: ${{ inputs.start_date }}
       end_date: ${{ inputs.end_date }}
+    secrets: inherit
