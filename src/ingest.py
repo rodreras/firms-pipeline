@@ -167,6 +167,7 @@ def run(
     cache: ChunkCache | None = None,
     covered_days: dict[str, set[date]] | None = None,
     run_id: str | None = None,
+    publish_empty_dates: bool = False,
 ) -> dict:
     try:
         from src.catalog import publish_catalog
@@ -223,7 +224,18 @@ def run(
             manifest["products_outside_window"] = sorted(
                 (set(SATELLITE_LIST) & availability.keys()) - {chunk.source for chunk in chunks}
             )
-        if not chunks:
+            if publish_empty_dates:
+                available = {
+                    chunk.start + timedelta(days=offset)
+                    for chunk in planned for offset in range(chunk.days)
+                }
+                available.update(day for days in (covered_days or {}).values() for day in days)
+                manifest["unavailable_dates"] = [
+                    day.isoformat()
+                    for offset in range((end_date - start_date).days + 1)
+                    if (day := start_date + timedelta(days=offset)) not in available
+                ]
+        if not chunks and not manifest.get("unavailable_dates"):
             if csv_manifest is None and planned:
                 manifest["outcome"] = "complete"
                 manifest["publication"] = {"assets": []}
