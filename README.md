@@ -89,8 +89,16 @@ prefixes. The pipeline uses the permissions already configured in GCS.
 The authenticated Google Cloud CLI must be able to create and read objects
 at both prefixes and replace the public annual files and collection.
 Replacing an object requires `storage.objects.create` and
-`storage.objects.delete`. The NASA key comes from `FIRMS_MAP_KEY` or
+`storage.objects.delete`. The root `README.md`, `AGENTS.md`, and
+`catalog.json` reuse identical contents and back up changed contents privately
+before a generation-checked replacement. The NASA key comes from `FIRMS_MAP_KEY` or
 `FIRMS_API_KEY`.
+
+Cloud runs emit a warning for processed dates with no detections and write
+one row per such day with only `acq_date` populated. Filter occurrences with
+`geom IS NOT NULL` to count detections. H3 summaries already exclude these rows.
+Dates outside FIRMS product availability remain eligible for download if
+availability changes.
 
 The pipeline uses the DuckDB community H3 extension. Install it once from
 the project Python environment if it is absent:
