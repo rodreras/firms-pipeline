@@ -2,6 +2,8 @@
 
 This repository publishes NASA FIRMS active-fire and thermal-anomaly detections for South America. It converts MODIS and VIIRS source records to annual GeoParquet, summarizes detections and fire radiative power (FRP) in H3 cells, and publishes PMTiles, MapLibre styles, and a STAC catalog in Google Cloud Storage (GCS).
 
+**[This is highly inspired in Portolan's FIRMS catalog](https://github.com/portolan-mirrors/firms-catalog/)**. This project main goal is to learn more about Portolan, Geoparquet specs, Tilertoo and PMTiles, Data Engineering best practices and to work with cloud providers (CGP).
+
 The default request box is `-82.44,-56.46,-34.10,13.58` in west, south, east, north order. Product availability determines the dates each satellite contributes. Detection counts can include repeated observations of the same fire.
 
 [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) · [Dataset description and schema](publication/occurrences/README.md)
