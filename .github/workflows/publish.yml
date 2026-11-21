@@ -43,7 +43,7 @@ jobs:
           python -m src.workflow_dates "$INGESTION_MODE" "${run_created_at%%T*}" \
             --start-date="$START_DATE" --end-date="$END_DATE" > "$RUNNER_TEMP/firms-intervals"
           cat "$RUNNER_TEMP/firms-intervals"
-      - run: uv sync --locked
+      - run: uv sync --locked --extra visualization
       - name: Install DuckDB H3
         run: uv run --no-sync python -c "import duckdb; duckdb.connect().execute('INSTALL h3 FROM community')"
       - uses: google-github-actions/auth@v3
@@ -71,5 +71,5 @@ jobs:
           : "${GCLOUD_PRIVATE_URI:?Set the GCLOUD_PRIVATE_URI environment secret}"
           while read -r start_date end_date; do
             uv run --no-sync python -m src.cloud \
-              --start-date "$start_date" --end-date "$end_date" --transaction-limit 5000
+              --start-date "$start_date" --end-date "$end_date" --transaction-limit 5000 --render-maps
           done < "$RUNNER_TEMP/firms-intervals"

@@ -15,7 +15,10 @@ import duckdb
 from dotenv import dotenv_values
 
 from src.annual import item_coverage
-from src.dataset import GCSUploadError, cloud_uri, load_h3, sha256, stage_dataset, stage_root, upload_dataset
+from src.dataset import (
+    COLLECTION_DOCUMENTS, ROOT_DOCUMENTS, GCSUploadError, cloud_uri, load_h3, sha256,
+    stage_dataset, stage_documents, stage_root, upload_dataset,
+)
 from src.firms_http import FirmsClient, FirmsError
 from src.ingest import (
     BBOX, JANUARY_END, JANUARY_START, Chunk, parse_bbox, run, verified_record, write_json,
@@ -121,6 +124,7 @@ def publish_run(
     start_date: date,
     end_date: date,
     bbox: str,
+    *, render_maps: bool = False,
 ) -> str:
     run_id = uuid4().hex
     with tempfile.TemporaryDirectory(prefix="firms-cloud-") as work:
@@ -171,10 +175,15 @@ def publish_run(
                         files = stage_dataset(
                             manifest, output, staged, destination, connection,
                             previous_years=previous,
+                            collection_id=collection["id"] if collection else None,
+                            render_maps=render_maps,
                         )
                     else:
                         staged.mkdir()
-                        files = [stage_root(staged)]
+                        stage_documents(staged, ROOT_DOCUMENTS)
+                        files = [*ROOT_DOCUMENTS, stage_root(staged)]
+                stage_documents(staged, COLLECTION_DOCUMENTS)
+                files[-1:-1] = COLLECTION_DOCUMENTS
                 backup_uri = cloud_uri(private, report / "annual-backup")
                 manifest["cloud_publication"] = {
                     "catalog": f"{destination}/catalog.json",
@@ -205,7 +214,7 @@ def publish_run(
                 write_json(output / report / "ready.json", manifest)
                 upload_dataset(output, private, [report / "ready.json"])
                 with update_annual_objects(
-                    staged, destination, files[-1:], {}, backup_destination=backup_uri,
+                    staged, destination, files[-1:] if years else files, {}, backup_destination=backup_uri,
                 ):
                     pass
                 manifest["cloud_publication"]["outcome"] = "complete"
@@ -258,6 +267,10 @@ def main() -> int:
     parser.add_argument("--start-date", type=date.fromisoformat, default=JANUARY_START)
     parser.add_argument("--end-date", type=date.fromisoformat, default=JANUARY_END)
     parser.add_argument("--bbox", type=parse_bbox, default=BBOX)
+    parser.add_argument(
+        "--render-maps", action=argparse.BooleanOptionalAction, default=True,
+        help="Build annual PMTiles and styles (default: enabled)",
+    )
     parser.add_argument("--transaction-limit", type=int, default=5000)
     args = parser.parse_args()
     if args.start_date > args.end_date:
@@ -280,10 +293,15 @@ def main() -> int:
         parser.error("set FIRMS_MAP_KEY or FIRMS_API_KEY in .env")
     if shutil.which("gcloud") is None:
         parser.error("the authenticated Google Cloud CLI is required")
+    if args.render_maps:
+        try:
+            __import__("tylertoo")
+        except ImportError:
+            parser.error("Install the visualization extra with uv sync --locked --extra visualization")
     try:
         run_id = publish_run(
             FirmsClient(key, args.transaction_limit), destination, private,
-            args.start_date, args.end_date, args.bbox,
+            args.start_date, args.end_date, args.bbox, render_maps=args.render_maps,
         )
     except (OSError, ValueError, FirmsError, duckdb.Error) as error:
         message = "\n".join([str(error), *getattr(error, "__notes__", [])])

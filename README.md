@@ -236,3 +236,22 @@ changed Python files, the local tests, and a redacted Gitleaks scan of PR
 commits. It uses no production credentials. Enable its two jobs as required
 checks in branch protection to enforce them. To scan staged changes locally,
 install pre-commit and run `pre-commit install` from the repository root.
+
+## H3 maps
+
+The publish workflow builds PMTiles and MapLibre styles for each updated year.
+For a local cloud run, install the visualization extra before you run
+`python -m src.cloud`. Map generation is on by default.
+
+Use the backfill script to build maps from the H3 assets that the published
+Items already reference. It uses `GCLOUD_URI` and `GCLOUD_PRIVATE_URI`.
+Preview a single year first:
+
+```bash
+uv sync --locked --extra visualization
+uv run --no-sync python scripts/backfill_pmtiles.py --start-year 2001 --end-year 2001
+```
+
+The script saves files and an event log under `tmp/pmtiles-backfill-*/`.
+Omit the year options to process all years. Pause the publisher and add
+`--apply` to upload the maps, styles, and updated STAC metadata.

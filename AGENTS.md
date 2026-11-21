@@ -89,7 +89,7 @@ firms/                                  # public dataset root
     year=YYYY/
       YYYY.json
       occurrences.parquet
-      aggregate-l0.parquet
+      aggregate-l5.parquet
       aggregate-l4.parquet
 logs/                                   # example private operations root
   chunks/
@@ -109,7 +109,7 @@ logs/                                   # example private operations root
 ## H3 aggregation
 
 - Generate H3 summaries as derived products, not replacements for raw detection points.
-- The current aggregates use resolutions 0 and 4, grouped by H3 cell and UTC observation year. The `geom` column stores WGS 84 cell polygons. Measures are detection count and FRP count, sum, average, and maximum. Missing FRP is excluded from FRP statistics. A group with no measured FRP has an FRP count of zero and null sum, average, and maximum. Changes to resolutions, grouping, or measures require owner approval.
+- The current aggregates use resolutions 4 and 5, grouped by H3 cell and UTC observation year. The `geom` column stores WGS 84 cell polygons. Measures are detection count and FRP count, sum, average, and maximum. Missing FRP is excluded from FRP statistics. A group with no measured FRP has an FRP count of zero and null sum, average, and maximum. Changes to resolutions, grouping, or measures require owner approval.
 - Validate spatial assignment and counts against source observations; document that detection counts are not automatically unique fires or burned area.
 
 ## STAC and Portolan

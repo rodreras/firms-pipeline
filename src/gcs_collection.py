@@ -36,7 +36,7 @@ def merge_collections(previous: dict, incoming: dict) -> dict:
     boxes = [box for extent in extents for box in extent["spatial"]["bbox"]]
     intervals = [interval for extent in extents for interval in extent["temporal"]["interval"]]
     starts, ends = zip(*intervals)
-    return {
+    merged = {
         **previous,
         "extent": {
             "spatial": {"bbox": [[min(b[0] for b in boxes), min(b[1] for b in boxes),
@@ -45,8 +45,27 @@ def merge_collections(previous: dict, incoming: dict) -> dict:
                                        None if None in ends else max(ends)]]},
         },
         "links": [link for link in previous["links"] if link["rel"] != "item"]
-        + [{"rel": "item", "href": f"./{links[year]}"} for year in sorted(links)],
+        + [
+            {
+                "rel": "item", "href": f"./{links[year]}",
+                **({"title": f"FIRMS detections in {year}"} if previous["id"] == "occurrences" else {}),
+            }
+            for year in sorted(links)
+        ],
     }
+
+    if incoming.get("firms:visual_year", 0) >= previous.get("firms:visual_year", 0) and "firms:visual_year" in incoming:
+        merged["firms:visual_year"] = incoming["firms:visual_year"]
+        merged["stac_extensions"] = list(dict.fromkeys(
+            previous.get("stac_extensions", []) + incoming.get("stac_extensions", [])
+        ))
+        merged["assets"] = {
+            key: value for key, value in previous.get("assets", {}).items()
+            if not key.startswith(("h3-r", "style-h3-r"))
+        } | incoming["assets"]
+        merged["links"] = [link for link in merged["links"] if link["rel"] != "pmtiles"]
+        merged["links"].extend(link for link in incoming["links"] if link["rel"] == "pmtiles")
+    return merged
 
 
 def read_collection(uri: str) -> tuple[str, dict | None]:

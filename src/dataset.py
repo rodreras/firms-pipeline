@@ -17,6 +17,8 @@ from src.annual import chunk_coverage, compact_coverage, item_coverage, merge_ob
 from src.catalog import PARQUET_MEDIA_TYPE, save_bytes, save_stac, yearly_asset
 from src.logs import event
 from src.normalize import COVERING, GEOMETRY
+from src.ingest import write_json
+from src.visualization import build_visuals, set_collection_visuals
 
 RESOLUTIONS = (4,5)
 SUMMARY_COLUMNS = {
@@ -30,33 +32,19 @@ SUMMARY_COLUMNS = {
     "geom": ("WKB", "H3 cell boundary polygon in WGS 84 degrees."),
 }
 
-DATASET_README = b"""# NASA FIRMS South America
+PUBLICATION_DOCS = Path(__file__).resolve().parents[1] / "publication"
+ROOT_DOCUMENTS = (Path("README.md"), Path("AGENTS.md"))
+COLLECTION_DOCUMENTS = tuple(Path("occurrences") / path for path in ROOT_DOCUMENTS)
 
-Open catalog.json to discover the occurrences collection and its annual items.
-Each year directory holds occurrences.parquet (WGS 84 point GeoParquet) and
-aggregate-l4.parquet and aggregate-l5.parquet (polygon GeoParquet grouped
-by H3 cell and UTC observation year). The Item records the processed date range and source
-products. A year directory can cover a partial year.
 
-Requested dates with no detections have a date-only row in occurrences.parquet.
-Use acq_date to include those dates, or filter with geom IS NOT NULL to count
-only detections. H3 summaries exclude date-only rows.
+def stage_documents(output: Path, paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        save_bytes(output / path, (PUBLICATION_DOCS / path).read_bytes())
 
-detection_count includes all detections, and frp_count includes only detections
-with an FRP value. frp_sum, frp_avg, and frp_max use measured FRP in megawatts
-and are null when the group has no measured FRP. Detections from different
-products can refer to the same fire. Counts represent detections.
-"""
-DATASET_AGENTS = b"""# Querying this dataset
 
-Start with catalog.json and follow the annual STAC Items. Resolve relative
-asset hrefs from the Item URL or use the asset's gcs:uri with GCS credentials.
-Use the Item's temporal coverage and firms:requested_start and
-firms:requested_end when comparing annual partitions. For occurrences use
-acquired_at and the longitude and latitude columns for filtering. For H3
-summaries select one resolution. See README.md for the measures and units.
-Use acq_date for date-only rows and geom IS NOT NULL for detections.
-"""
+def link_documents(document: pystac.Catalog) -> None:
+    document.add_link(pystac.Link("describedby", "./README.md", media_type="text/markdown"))
+    document.add_link(pystac.Link("agents", "./AGENTS.md", media_type="text/markdown"))
 
 
 def sha256(path: Path) -> str:
@@ -112,6 +100,8 @@ def stage_dataset(
     manifest: dict, source: Path, output: Path, destination: str,
     connection: duckdb.DuckDBPyConnection,
     *, previous_years: dict[int, tuple[dict, Path]] | None = None,
+    collection_id: str | None = None,
+    render_maps: bool = False,
 ) -> list[Path]:
     source = source.resolve()
     assets = manifest.get("publication", {}).get("assets", [])
@@ -123,6 +113,7 @@ def stage_dataset(
     collection_path = Path("occurrences/collection.json")
     collection = None
     files = []
+    latest_map = None
     unavailable = {date.fromisoformat(day) for day in manifest.get("unavailable_dates", [])}
     for record in sorted(assets, key=lambda asset: asset["year"]):
         year = record["year"]
@@ -132,6 +123,8 @@ def stage_dataset(
         if collection is None:
             collection = pystac.Collection.from_file(str(parquet.parent.parent / "collection.json"))
             collection.clear_links()
+            if collection_id is not None:
+                collection.id = collection_id
         year_chunks = [chunk for chunk in manifest["chunks"] if chunk["requested_start"][:4] == str(year)]
         new_coverage = chunk_coverage(year_chunks)
         coverage = {source: days.copy() for source, days in new_coverage.items()}
@@ -179,6 +172,7 @@ def stage_dataset(
         for key in list(item.properties):
             if key.startswith(("table:", "proj:")):
                 occurrences.extra_fields[key] = item.properties.pop(key)
+        visuals = {}
         for resolution in RESOLUTIONS:
             path = partition / f"aggregate-l{resolution}.parquet"
             event("h3_aggregation_started", year=year, resolution=resolution)
@@ -199,6 +193,10 @@ def stage_dataset(
                 },
             ))
             event("h3_aggregation_finished", year=year, resolution=resolution, cells=len(summary))
+            if render_maps:
+                visuals.update(build_visuals(output / path, output / partition, resolution))
+        for key, asset in visuals.items():
+            item.add_asset(key, pystac.Asset.from_dict(asset))
 
         item_path = partition / f"{year}.json"
         item.properties["gcs:uri"] = cloud_uri(destination, item_path)
@@ -215,13 +213,20 @@ def stage_dataset(
         save_stac(output / item_path, item)
         collection.add_link(pystac.Link("item", f"./{item_path.relative_to(collection_path.parent).as_posix()}"))
         files.append(item_path)
+        if visuals:
+            latest_map = (year, item_path.relative_to(collection_path.parent).as_posix(), visuals)
 
     collection.add_link(pystac.Link("root", "../catalog.json"))
     collection.add_link(pystac.Link("parent", "../catalog.json"))
     collection.add_link(pystac.Link("license", "https://www.earthdata.nasa.gov/data/use-policy"))
+    collection.title = "NASA FIRMS Occurrences"
+    link_documents(collection)
     save_stac(output / collection_path, collection)
-    save_bytes(output / "README.md", DATASET_README)
-    save_bytes(output / "AGENTS.md", DATASET_AGENTS)
+    if latest_map is not None:
+        collection_doc = json.loads((output / collection_path).read_bytes())
+        set_collection_visuals(collection_doc, *latest_map)
+        write_json(output / collection_path, collection_doc)
+    stage_documents(output, ROOT_DOCUMENTS)
     stage_root(output)
     staged = pystac.Catalog.from_file(str(output / "catalog.json"))
     staged_collection, = staged.get_children()
@@ -231,9 +236,13 @@ def stage_dataset(
 
 
 def stage_root(output: Path) -> Path:
-    catalog = pystac.Catalog(id="south-america-corner", description="Geospatial datasets for South America.")
+    catalog = pystac.Catalog(
+        id="south-america-corner", title="South America Geospatial Catalog",
+        description="NASA FIRMS active-fire detections and H3 summaries for South America.",
+    )
+    link_documents(catalog)
     catalog.add_link(pystac.Link("root", "./catalog.json"))
-    catalog.add_link(pystac.Link("child", "./occurrences/collection.json"))
+    catalog.add_link(pystac.Link("child", "./occurrences/collection.json", title="NASA FIRMS Occurrences"))
     path = Path("catalog.json")
     save_stac(output / path, catalog)
     return path

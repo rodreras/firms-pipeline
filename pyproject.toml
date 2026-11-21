@@ -20,5 +20,8 @@ dependencies = [
     "stac-check>=1.14.0",
 ]
 
+[project.optional-dependencies]
+visualization = ["tylertoo==0.8.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
