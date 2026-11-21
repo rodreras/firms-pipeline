@@ -1,6 +1,5 @@
 """Build annual H3 tile archives and MapLibre styles from GeoParquet."""
 
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -40,13 +39,29 @@ def make_style(values: pa.ChunkedArray, archive: str, layer: str, metric: str) -
     return {
         "version": 8,
         "name": METRICS[metric],
-        "metadata": {"firms:metric": metric, "firms:breaks": breaks, "firms:missing_color": "#808080"},
+        "metadata": {
+            "firms:metric": metric,
+            "firms:breaks": breaks,
+            "firms:missing_color": "#808080",
+        },
         "sources": {"data": {"type": "vector", "url": f"../{archive}"}},
-        "layers": [{
-            "id": metric, "type": "fill", "source": "data", "source-layer": layer,
-            "paint": {"fill-color": ["case", ["==", ["typeof", ["get", metric]], "number"],
-                                     color, "#808080"], "fill-opacity": 0.8},
-        }],
+        "layers": [
+            {
+                "id": metric,
+                "type": "fill",
+                "source": "data",
+                "source-layer": layer,
+                "paint": {
+                    "fill-color": [
+                        "case",
+                        ["==", ["typeof", ["get", metric]], "number"],
+                        color,
+                        "#808080",
+                    ],
+                    "fill-opacity": 0.8,
+                },
+            }
+        ],
     }
 
 
@@ -65,28 +80,40 @@ def build_visuals(source: Path, output: Path, resolution: int) -> dict[str, dict
         tile_input = Path(work) / "h3.parquet"
         overview = Path(work) / "overview.parquet"
         index = table.schema.get_field_index("h3_cell")
-        converted = table.set_column(index, "h3_cell", pc.cast(table["h3_cell"], pa.string()))
+        converted = table.set_column(
+            index, "h3_cell", pc.cast(table["h3_cell"], pa.string())
+        )
         pq.write_table(converted, tile_input, compression="zstd")
         tylertoo.overview(str(tile_input), str(overview), max_zoom=MAX_ZOOM[resolution])
-        report = tylertoo.export_pmtiles(str(overview), str(output / archive), layer_name=layer)
+        report = tylertoo.export_pmtiles(
+            str(overview), str(output / archive), layer_name=layer
+        )
     event("pmtiles_build_finished", resolution=resolution, source=source.name, **report)
-    assets = {layer: {
-        "href": f"./{archive}", "type": PMTILES, "roles": ["visual"],
-        "title": f"H3 resolution {resolution} map",
-    }}
+    assets = {
+        layer: {
+            "href": f"./{archive}",
+            "type": PMTILES,
+            "roles": ["visual"],
+            "title": f"H3 resolution {resolution} map",
+        }
+    }
     styles = output / "styles"
     styles.mkdir(exist_ok=True)
     for metric in METRICS:
         path = f"styles/{layer}-{metric}.json"
         write_json(output / path, make_style(table[metric], archive, layer, metric))
         assets[f"style-{layer}-{metric}"] = {
-            "href": f"./{path}", "type": STYLE, "roles": ["style"],
+            "href": f"./{path}",
+            "type": STYLE,
+            "roles": ["style"],
             "title": f"H3 resolution {resolution} · {METRICS[metric]}",
         }
     return assets
 
 
-def set_collection_visuals(collection: dict, year: int, item_href: str, assets: dict) -> None:
+def set_collection_visuals(
+    collection: dict, year: int, item_href: str, assets: dict
+) -> None:
     if not assets or year < collection.get("firms:visual_year", 0):
         return
     base = Path(item_href).parent
@@ -94,7 +121,9 @@ def set_collection_visuals(collection: dict, year: int, item_href: str, assets: 
     extensions = collection.setdefault("stac_extensions", [])
     if WEB_MAP_LINKS not in extensions:
         extensions.append(WEB_MAP_LINKS)
-    collection["links"] = [link for link in collection["links"] if link["rel"] != "pmtiles"]
+    collection["links"] = [
+        link for link in collection["links"] if link["rel"] != "pmtiles"
+    ]
     current = collection.setdefault("assets", {})
     for name in list(current):
         if name.startswith(("h3-r", "style-h3-r")):
@@ -102,10 +131,16 @@ def set_collection_visuals(collection: dict, year: int, item_href: str, assets: 
     for name, asset in assets.items():
         entry = {**asset, "href": f"./{(base / asset['href']).as_posix()}"}
         if entry["type"] == PMTILES:
-            collection["links"].append({
-                "rel": "pmtiles", "pmtiles:layers": [name],
-                **{key: entry[key] for key in ("href", "type", "title")},
-            })
+            collection["links"].append(
+                {
+                    "rel": "pmtiles",
+                    "pmtiles:layers": [name],
+                    **{key: entry[key] for key in ("href", "type", "title")},
+                }
+            )
         current[name] = entry
-    default = current.get("style-h3-r4-detection_count") or current["style-h3-r5-detection_count"]
+    default = (
+        current.get("style-h3-r4-detection_count")
+        or current["style-h3-r5-detection_count"]
+    )
     default["roles"] = ["style", "default"]
