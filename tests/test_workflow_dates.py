@@ -22,6 +22,15 @@ class WorkflowDateTests(unittest.TestCase):
             ],
         )
 
+    def test_next_scheduled_run_covers_a_missed_run(self):
+        missed_run = date(2026, 11, 19)
+        next_run = date(2026, 11, 20)
+        ((_, missed_day),) = intervals("daily", missed_run)
+        ((first, last),) = intervals("daily", next_run)
+        self.assertEqual((first, last), (date(2026, 11, 13), date(2026, 11, 19)))
+        self.assertLessEqual(first, missed_day)
+        self.assertLessEqual(missed_day, last)
+
     def test_explicit_end_anchors_daily_lookback(self):
         end = date(2025, 10, 8)
         self.assertEqual(

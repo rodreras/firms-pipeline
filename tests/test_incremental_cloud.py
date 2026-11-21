@@ -3,7 +3,8 @@ import json
 import subprocess
 import unittest
 from contextlib import redirect_stderr
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -100,7 +101,7 @@ class CloudPublicationFixture(unittest.TestCase):
         ]
         return (columns + "".join(rows)).encode()
 
-    def publish(self, first, last):
+    def publish(self, first, last, *, render_maps=False):
         return publish_run(
             self.client,
             self.public,
@@ -108,6 +109,7 @@ class CloudPublicationFixture(unittest.TestCase):
             date.fromisoformat(first),
             date.fromisoformat(last),
             BBOX,
+            render_maps=render_maps,
         )
 
     def collection(self):
@@ -178,6 +180,119 @@ class IncrementalCloudTests(CloudPublicationFixture):
             self.assertEqual(summary["frp_sum"], 57)
             self.assertEqual(summary["frp_avg"], 19)
             self.assertEqual(summary["frp_max"], 20)
+
+    def test_one_day_rebuilds_annual_data_maps_and_metadata(self):
+        first, second = "2021-11-18", "2021-11-19"
+
+        def load_h3(connection):
+            self.load_h3(connection)
+            connection.execute("""
+                CREATE OR REPLACE MACRO h3_latlng_to_cell(lat, lng, resolution)
+                    AS CAST(resolution AS UBIGINT) + CASE WHEN lat = -11 THEN 10 ELSE 0 END;
+            """)
+
+        def csv_data(source, bbox, start, days):
+            data = self.csv_data(source, bbox, start, days)
+            if start.isoformat() == first:
+                data += f"-11,-60,{start},0010,310,290,80,9\n".encode()
+            return data
+
+        self.client.area.side_effect = csv_data
+        self.enterContext(patch("src.cloud.load_h3", side_effect=load_h3))
+        self.publish(first, first, render_maps=True)
+        prior = self.public_snapshot()
+        old_item = self.items()["2021"]
+
+        self.publish(second, second, render_maps=True)
+        current = self.public_snapshot()
+        item = self.items()["2021"]
+        properties = item["properties"]
+        self.assertEqual(properties["firms:requested_start"], first)
+        self.assertEqual(properties["firms:requested_end"], second)
+        self.assertEqual(
+            properties["firms:coverage"]["MODIS_SP"],
+            [[first, second]],
+        )
+        self.assertEqual(
+            datetime.fromisoformat(properties["start_datetime"]).date().isoformat(),
+            first,
+        )
+        self.assertEqual(
+            datetime.fromisoformat(properties["end_datetime"]).date().isoformat(),
+            second,
+        )
+        self.assertEqual(properties["firms:products"], ["MODIS_SP"])
+
+        assets = item["assets"]
+        self.assertEqual(assets["data"]["table:row_count"], 3)
+        self.assertEqual(
+            sorted(row["acq_date"].isoformat() for row in self.rows(assets["data"])),
+            [first, first, second],
+        )
+        changed = ["data"]
+        for resolution in RESOLUTIONS:
+            key = f"aggregate-l{resolution}"
+            layer = f"h3-r{resolution}"
+            summary_asset = assets[key]
+            self.assertEqual(summary_asset["table:row_count"], 2)
+            row, other = self.rows(summary_asset)
+            self.assertEqual(other["detection_count"], 1)
+            self.assertEqual(
+                [
+                    row[name]
+                    for name in (
+                        "detection_count",
+                        "frp_count",
+                        "frp_sum",
+                        "frp_avg",
+                        "frp_max",
+                    )
+                ],
+                [2, 2, 37, 18.5, 19],
+            )
+            self.assertTrue(current[assets[layer]["gcs:uri"]][0].startswith(b"PMTiles"))
+            changed.extend([key, layer])
+            for metric in ("detection_count", "frp_sum", "frp_avg", "frp_max"):
+                style_key = f"style-{layer}-{metric}"
+                changed.append(style_key)
+                style = json.loads(current[assets[style_key]["gcs:uri"]][0])
+                self.assertEqual(style["layers"][0]["source-layer"], layer)
+                self.assertEqual(style["metadata"]["firms:metric"], metric)
+
+        for key, asset in assets.items():
+            uri = asset["gcs:uri"]
+            data, generation, metadata_digest = current[uri]
+            self.assertEqual(sha256(data).hexdigest(), asset["firms:sha256"], key)
+            self.assertEqual(metadata_digest, asset["firms:sha256"], key)
+            if key in changed:
+                self.assertNotEqual(
+                    asset["firms:sha256"], old_item["assets"][key]["firms:sha256"]
+                )
+                self.assertEqual(generation, prior[uri][1] + 1)
+
+        catalog_uri = f"{self.public}/catalog.json"
+        self.assertEqual(current[catalog_uri], prior[catalog_uri])
+        catalog = json.loads(current[catalog_uri][0])
+        (child,) = (link for link in catalog["links"] if link["rel"] == "child")
+        self.assertEqual(child["href"], "./occurrences/collection.json")
+        collection = self.collection()
+        self.assertEqual(
+            collection["extent"]["temporal"]["interval"],
+            [[properties["start_datetime"], properties["end_datetime"]]],
+        )
+        self.assertEqual(collection["firms:visual_year"], 2021)
+        for resolution in RESOLUTIONS:
+            layer = f"h3-r{resolution}"
+            self.assertEqual(
+                collection["assets"][layer]["href"],
+                f"./year=2021/aggregate-l{resolution}.pmtiles",
+            )
+        self.assertEqual(set(self.items()), {"2021"})
+
+        self.client.area.reset_mock()
+        self.publish(second, second, render_maps=True)
+        self.client.area.assert_not_called()
+        self.assertEqual(self.public_snapshot(), current)
 
     def test_cross_year_update_failure_preserves_both_items_and_reuses_cache(self):
         self.publish("2025-12-30", "2026-01-01")
